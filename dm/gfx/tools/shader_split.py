@@ -953,6 +953,23 @@ def pg_sized_shader(d, label):
     if why: red(f'{label} ({st}): {why}')
     return [(f'{label}#PGSO', st, ctl, code)]
 
+def bedrock_shader(d, label):
+    """Bedrock engine (.glslc shader binary, Minecraft): u32 code length, code area (GFX_MAGIC / CS_MAGIC),
+    u32 control length, control section (CTL_MAGIC), then reflection."""
+    if len(d) < 12: return []
+    ncode = struct.unpack_from('<I', d, 0)[0]
+    if ncode < 0x80 or ncode + 8 > len(d) or d[4:8] not in (GFX_MAGIC, CS_MAGIC): return []
+    code = d[4:4 + ncode]
+    nctl = struct.unpack_from('<I', d, 4 + ncode)[0]
+    ctloff = 8 + ncode
+    if nctl < 0x700 or ctloff + nctl > len(d) or d[ctloff:ctloff + 4] != CTL_MAGIC: return []
+    ctl = d[ctloff:ctloff + nctl]
+    st = 'cs' if code[:4] == CS_MAGIC else sph_stage(code)
+    if st is None: red(f'{label}: shader has an unknown SPH stage')
+    why = check(label, st, ctl, code)
+    if why: red(f'{label} ({st}): {why}')
+    return [(f'{label}#BEDROCK', st, ctl, code)]
+
 MTARC, MTSPK = b'ARC\0', b'SPK\0'
 def mtarc_members(d, label):
     """Capcom's MT Framework archive: 'ARC\\0', u16 version 7, u16 entry count, then one entry per file {char path[128 or 64] ('\\\\'-separated, no extension), u32 type hash, u32 stored length,
@@ -2757,6 +2774,7 @@ def scan_blob(d, label, out, depth=0, left=None):
         return
     if d[:4] in PG_STAGES and len(d) >= 0x18 and d[(o := struct.unpack_from('<I', d, 0xc)[0]):o + 4] == CTL_MAGIC: out.extend(pg_shader(d, label)); return
     if shaders := pg_sized_shader(d, label): out.extend(shaders); return
+    if shaders := bedrock_shader(d, label): out.extend(shaders); return
     if (shaders := viper_shader(d, label)) is not None: out.extend(shaders); return   # Star Fox's shader binaries
     if d[:4] == b'VIPR':   # Star Fox's resource containers: two of them wrap the engine's NDSR upscaler networks (ounce-nvn2-upper_left_ndsr.bin), 40 shaders each, as a file inside
         for m in re.finditer(b'NDSR', d):
@@ -2789,7 +2807,7 @@ def pixel_input_cover(shaders):
         k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
     return cover
 
-SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
+SINGLE_STAGE = ('#GLSLC@', '#VIPER', '#UE', '#MTSPK@', '#MGFX@', '#NLG', '#PGSO', '#RAW@', '#TFXO@', '#NEEDLE@', '#SNOWDROP@', '#PHYRE@', '#SUMO@', '#NVNSH@', '#BEDROCK')   # sources whose every shader is a program of one stage: GLSLC outputs, Unreal's shader records, MT Framework's shader package (BNSH variations, Unity programs, MSHD and SDF pair theirs);
 # Unreal Engine 3's shader caches (ue3_shaders, '#UE3@'); MonoGame's effects, whose passes may name no vertex shader and keep the one bound (Celeste: 10 of its 13 effects draw through SpriteBatch's vertex shader, which is in main); Next Level Games'
 # archives (Luigi's Mansion 3 makes 5,317 programs of one stage each at boot); PlatinumGames' shader objects (Bayonetta 3: one stage each, pg_shader); control sections loose in main
 # (Advance Wars 1+2: Re-Boot Camp's Bink shaders, raw_shaders), which no file pairs; YEBIS's effect file (tfxo_shaders); and Sumo's Ninty_NX descriptors and NVNsh records, one stage
@@ -3059,7 +3077,8 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif (b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDSR' and d[:4] != b'NARC' and d[:4] != b'NDVE' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d
+          and not (len(d) >= 8 and d[4:8] in (GFX_MAGIC, CS_MAGIC))): return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
@@ -3214,6 +3233,7 @@ def main():
                                             ('MT Framework SPK', any('#MTSPK@' in r[4] for r in rows)), ('MonoGame MGFX', any('#MGFX@' in r[4] for r in rows)),
                                             ('PlatinumGames shader objects', any('#PGSO' in r[4] for r in rows)),
                                             ('Snowdrop shader objects', any('#SNOWDROP@' in r[4] for r in rows)),
+                                            ('Bedrock .glslc', any('#BEDROCK' in r[4] for r in rows)),
                                             ('Unreal Engine shader code archives', any('#UE' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE} ({kinds} in RomFS + main) → control section + code area keys (dm/gfx/tools/shader_split.py)\n')
         f.write('# column 5 records where each key first appears; no PC shader pairing supplied\n')
